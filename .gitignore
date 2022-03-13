@@ -2,3 +2,5 @@
 .idea/
 **/cifar/
 **/caltech256/
+
+.DS_Store
