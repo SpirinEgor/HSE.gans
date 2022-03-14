@@ -2,5 +2,9 @@
 .idea/
 **/cifar/
 **/caltech256/
+**/wandb/
+**/data/
 
+**/*celeba*
 .DS_Store
+*.ckpt
