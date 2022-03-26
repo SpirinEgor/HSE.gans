@@ -27,11 +27,11 @@ def unsqueeze(x: Tensor) -> Tensor:
     return x
 
 
-def gaussian_log_p(x: Tensor, mean: Tensor, log_std: Tensor) -> Tensor:
+def normal_log_p(x: Tensor, mean: Tensor, log_std: Tensor) -> Tensor:
     return -0.5 * math.log(2 * math.pi) - log_std - 0.5 * (x - mean) ** 2 / torch.exp(2 * log_std)
 
 
-def gaussian_sample(eps: Tensor, mean: Tensor, log_std: Tensor):
+def normal_sample(eps: Tensor, mean: Tensor, log_std: Tensor):
     return mean + torch.exp(log_std) * eps
 
 
@@ -93,12 +93,12 @@ class InvariantConv2d(nn.Module):
         w_p, lower, upper = torch.lu_unpack(*torch.lu(w))
         self.register_buffer("w_p", w_p)
 
-        self.upper = nn.Parameter(upper)
+        self.upper = nn.Parameter(torch.triu(upper, 1))
         self.register_buffer("u_mask", torch.triu(torch.ones(shape), 1))
 
         self.lower = nn.Parameter(lower)
         self.register_buffer("l_mask", torch.tril(torch.ones(shape), -1))
-        self.register_buffer("eye", torch.eye(*shape))
+        self.register_buffer("eye", torch.eye(n_channels))
 
         s = torch.diag(upper)
         self.register_buffer("sign_s", torch.sign(s))
@@ -136,13 +136,14 @@ class InvariantConv2d(nn.Module):
 class ZeroConv2d(nn.Module):
     def __init__(self, in_channel: int, out_channel: int):
         super().__init__()
-        self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=1)
+        self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=0)
         self.conv.weight.data.zero_()
         self.conv.bias.data.zero_()
         self.scale = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
 
     @torch.no_grad()
     def forward(self, x: Tensor) -> Tensor:
+        x = F.pad(x, [1, 1, 1, 1], value=1)
         out = self.conv(x)
         return out * torch.exp(self.scale * 3)
 
@@ -174,7 +175,7 @@ class AffineCoupling(nn.Module):
         y_b = (x_b + t) * s
         out = torch.cat([x_a, y_b], 1)
 
-        log_det = torch.sum(torch.log(s).view(x.shape[0], -1), dim=1)
+        log_det = torch.sum(torch.log(s), dim=[1, 2, 3])
         return out, log_det
 
     @torch.no_grad()
@@ -221,6 +222,8 @@ class GlowBlock(nn.Module):
         )
 
     def forward(self, x: Tensor) -> QUATRO_TENSOR:
+        bs = x.shape[0]
+
         # 1. Squeeze
         x = squeeze(x)
 
@@ -234,28 +237,31 @@ class GlowBlock(nn.Module):
         if self._is_last:
             zero = torch.zeros_like(x)
             mean, log_std = self.prior(zero).chunk(2, 1)
+            log_p = normal_log_p(x, mean, log_std)
+            log_p = log_p.view(bs, -1).sum(dim=1)
             out, z_new = x, x
         else:
             out, z_new = x.chunk(2, 1)
             mean, log_std = self.prior(out).chunk(2, 1)
-
-        log_p = gaussian_log_p(z_new, mean, log_std)
-        log_p = log_p.sum(dim=[1, 2, 3])
+            log_p = normal_log_p(z_new, mean, log_std)
+            log_p = log_p.view(bs, -1).sum(dim=1)
 
         return out, z_new, log_p, log_det
 
     @torch.no_grad()
     def reverse(self, y: Tensor, eps: Tensor, is_reconstruct: bool = False) -> Tensor:
         if is_reconstruct:
-            y = eps if self._is_last else torch.cat([y, eps], dim=1)
+            if not self._is_last:
+                y = torch.cat([y, eps], dim=1)
         else:
             if self._is_last:
-                mean, log_std = self.prior(torch.zeros_like(y)).chunk(2, 1)
-                z = gaussian_sample(eps, mean, log_std)
+                zero = torch.zeros_like(y)
+                mean, log_std = self.prior(zero).chunk(2, 1)
+                z = normal_sample(eps, mean, log_std)
                 y = z
             else:
                 mean, log_std = self.prior(y).chunk(2, 1)
-                z = gaussian_sample(eps, mean, log_std)
+                z = normal_sample(eps, mean, log_std)
                 y = torch.cat([y, z], dim=1)
 
         for flow in reversed(self.flow_blocks):
@@ -265,10 +271,8 @@ class GlowBlock(nn.Module):
 
 
 class Glow(nn.Module):
-    def __init__(self, n_channels: int, n_filters: int, k_flow: int, l_block: int, is_linear: bool = False):
+    def __init__(self, k_flow: int, l_block: int, n_filters: int, n_channels: int = 3):
         super().__init__()
-        self._is_linear = is_linear
-
         self.blocks = nn.ModuleList()
         cur_channels = n_channels
         for _ in range(l_block - 1):
@@ -277,11 +281,6 @@ class Glow(nn.Module):
         self.blocks.append(GlowBlock(cur_channels, n_filters, k_flow, is_last=True))
 
     def forward(self, x: Tensor) -> GLOW_OUT:
-        if self._is_linear:
-            bs, n = x.shape
-            # [bs; 1; n; n]
-            x = x.unsqueeze(1).expand(bs, n, n).unsqueeze(1)
-
         z_outs = []
         log_det = 0
         log_p = 0
@@ -302,12 +301,9 @@ class Glow(nn.Module):
                 x = block.reverse(z, z, is_reconstruct)
             else:
                 x = block.reverse(x, z, is_reconstruct)
-
-        if self._is_linear:
-            x = x[:, 0, 0]
         return x
 
-    def sample(self, n_samples: int, n_channels: int, img_size: int, device: torch.device) -> Tensor:
+    def prepare_sample_noise(self, n_samples: int, img_size: int, n_channels: int = 3) -> List[Tensor]:
         z_shapes = []
         for _ in range(len(self.blocks) - 1):
             n_channels *= 2
@@ -317,6 +313,6 @@ class Glow(nn.Module):
 
         z_samples = []
         for shape in z_shapes:
-            z_samples.append(torch.randn(n_samples, *shape).to(device))
+            z_samples.append(torch.randn(n_samples, *shape))
 
-        return self.reverse(z_samples)
+        return z_samples
