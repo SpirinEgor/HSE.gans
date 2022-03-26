@@ -7,3 +7,5 @@ gdown
 natsort
 requests
 wandb
+pillow
+scikit-learn
