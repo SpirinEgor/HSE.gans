@@ -94,8 +94,8 @@ class InvariantConv2d(nn.Module):
         self.S = nn.Parameter(U.diag())  # "crop out" the diagonal to its own parameter
         self.U = nn.Parameter(torch.triu(U, diagonal=1))  # "crop out" diagonal, stored in S
 
-    def calc_weights(self) -> Tensor:
-        L = torch.tril(self.L, diagonal=-1) + torch.eye(self.dim)
+    def calc_weights(self, device: torch.device) -> Tensor:
+        L = torch.tril(self.L, diagonal=-1) + torch.eye(self.dim, device=device)
         U = torch.triu(self.U, diagonal=1)
         W = self.P @ L @ (U + torch.diag(self.S))
         return W.view(self.dim, self.dim, 1, 1)
@@ -104,7 +104,7 @@ class InvariantConv2d(nn.Module):
         """
         log det: h * w * sum(log(|s|))
         """
-        weights = self.calc_weights()
+        weights = self.calc_weights(x.device)
         out = F.conv2d(x, weights)
 
         _, _, height, width = x.shape
@@ -114,7 +114,7 @@ class InvariantConv2d(nn.Module):
 
     @torch.no_grad()
     def reverse(self, y: torch.Tensor) -> Tensor:
-        weights = self.calc_weights().squeeze()
+        weights = self.calc_weights(y.device).squeeze()
         weights = weights.inverse()
         weights = weights.view(self.dim, self.dim, 1, 1)
 
