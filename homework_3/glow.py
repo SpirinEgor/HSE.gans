@@ -89,7 +89,7 @@ class InvariantConv2d(nn.Module):
         Q = nn.init.orthogonal_(torch.rand((n_channels, n_channels)))
         P, L, U = torch.lu_unpack(*Q.lu())
 
-        self.P = P  # remains fixed during optimization
+        self.register_buffer("P", P)  # remains fixed during optimization
         self.L = nn.Parameter(L)  # lower triangular portion
         self.S = nn.Parameter(U.diag())  # "crop out" the diagonal to its own parameter
         self.U = nn.Parameter(torch.triu(U, diagonal=1))  # "crop out" diagonal, stored in S
@@ -97,7 +97,7 @@ class InvariantConv2d(nn.Module):
     def calc_weights(self, device: torch.device) -> Tensor:
         L = torch.tril(self.L, diagonal=-1) + torch.eye(self.dim, device=device)
         U = torch.triu(self.U, diagonal=1)
-        W = self.P @ L @ (U + torch.diag(self.S).to(device))
+        W = self.P @ L @ (U + torch.diag(self.S))
         return W.view(self.dim, self.dim, 1, 1)
 
     def forward(self, x: torch.Tensor) -> DOUBLE_TENSOR:
