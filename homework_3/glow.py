@@ -303,16 +303,17 @@ class Glow(nn.Module):
                 x = block.reverse(x, z, is_reconstruct)
         return x
 
-    def prepare_sample_noise(self, n_samples: int, img_size: int, n_channels: int = 3) -> List[Tensor]:
+    def get_sample_noise_shapes(self, img_size: int, n_channels: int = 3) -> List:
         z_shapes = []
         for _ in range(len(self.blocks) - 1):
             n_channels *= 2
             img_size //= 2
             z_shapes.append((n_channels, img_size, img_size))
         z_shapes.append((n_channels * 4, img_size // 2, img_size // 2))
+        return z_shapes
 
-        z_samples = []
-        for shape in z_shapes:
-            z_samples.append(torch.randn(n_samples, *shape))
-
-        return z_samples
+    def sample(self, z_noise: List[Tensor]) -> Tensor:
+        with torch.no_grad():
+            sampled_images = self.reverse(z_noise)
+            sampled_images = sampled_images.clamp(-0.5, 0.5) + 0.5
+        return sampled_images

@@ -68,3 +68,9 @@ class Vae64x64(nn.Module):
         z = self.reparameterize(mu, log_sigma)
         reconstruct = self.decode(z)
         return reconstruct, z, mu, log_sigma
+
+    def sample(self, z_noise: Tensor) -> Tensor:
+        with torch.no_grad():
+            sampled_images = self.decode(z_noise)
+            sampled_images = (sampled_images + 1) / 2
+        return sampled_images
