@@ -97,7 +97,7 @@ class InvariantConv2d(nn.Module):
     def calc_weights(self, device: torch.device) -> Tensor:
         L = torch.tril(self.L, diagonal=-1) + torch.eye(self.dim, device=device)
         U = torch.triu(self.U, diagonal=1)
-        W = self.P @ L @ (U + torch.diag(self.S))
+        W = self.P @ L @ (U + torch.diag(self.S).to(device))
         return W.view(self.dim, self.dim, 1, 1)
 
     def forward(self, x: torch.Tensor) -> DOUBLE_TENSOR:
