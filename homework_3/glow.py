@@ -36,39 +36,34 @@ def gaussian_sample(eps: Tensor, mean: Tensor, log_std: Tensor):
 
 
 class ActNorm(nn.Module):
-    def __init__(self, n_channels: int):
+    def __init__(self, in_channel: int):
         super().__init__()
-        self.n_channels = n_channels
 
-        self.log_s = nn.Parameter(torch.zeros(1, n_channels, 1, 1), requires_grad=True)
-        self.b = nn.Parameter(torch.zeros(1, n_channels, 1, 1), requires_grad=True)
-        self._initialized = False
+        self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))
+        self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1))
 
-    def _init_weights(self, x: Tensor):
+        self._is_init = False
+
+    def _initialize(self, x: Tensor):
         with torch.no_grad():
-            s = torch.std(x, dim=0, keepdim=True)
-            self.log_s.data = -torch.log(s)
-            self.b.data = -torch.mean(x, dim=0, keepdim=True) * self.log_s.exp()
-            self._initialized = True
+            mean = x.mean(dim=(0, 2, 3), keepdim=True)
+            std = x.std(dim=(0, 2, 3), keepdim=True)
+            self.loc.data.copy_(-mean)
+            self.scale.data.copy_(1 / (std + 1e-6))
+        self._is_init = True
 
     def forward(self, x: Tensor) -> DOUBLE_TENSOR:
-        """
-        log det: h * w * sum(log|s|)
-        """
-        if not self._initialized:
-            self._init_weights(x)
-
-        out = x * self.log_s.exp() + self.b
+        if not self._is_init:
+            self._initialize(x)
 
         _, _, height, width = x.shape
-        log_det = torch.sum(self.log_s)
+        log_abs = torch.log(torch.abs(self.scale))
+        log_det = height * width * torch.sum(log_abs)
 
-        return out, log_det
+        return self.scale * (x + self.loc), log_det
 
-    @torch.no_grad()
-    def reverse(self, y: torch.Tensor) -> Tensor:
-        out = (y - self.b) * torch.exp(-self.log_s)
-        return out
+    def reverse(self, output):
+        return output / self.scale - self.loc
 
 
 class InvariantConv2d(nn.Module):
@@ -112,7 +107,6 @@ class InvariantConv2d(nn.Module):
 
         return out, log_det
 
-    @torch.no_grad()
     def reverse(self, y: torch.Tensor) -> Tensor:
         weights = self.calc_weights(y.device).squeeze()
         weights = weights.inverse()
@@ -129,60 +123,48 @@ class ZeroConv2d(nn.Module):
         self.conv.bias.data.zero_()
         self.scale = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
 
-    @torch.no_grad()
     def forward(self, x: Tensor) -> Tensor:
         x = F.pad(x, [1, 1, 1, 1], value=1)
         out = self.conv(x)
         return out * torch.exp(self.scale * 3)
 
 
-class NormalizedConv2D(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0):
-        super().__init__()
-        self.conv = nn.utils.weight_norm(nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding))
-
-    def forward(self, batch: torch.Tensor) -> torch.Tensor:
-        return self.conv(batch)
-
-
 class AffineCoupling(nn.Module):
-    def __init__(self, in_channels: int, n_filters: int):
-        """
-        We initialize the last convolution of each NN() with zeros,
-        such that each affine coupling layer initially performs an identity function;
-        we found that this helps training very deep networks.
-        """
+    def __init__(self, in_channel: int, filter_size: int):
         super().__init__()
-
         self.net = nn.Sequential(
-            NormalizedConv2D(in_channels // 2, n_filters, 3, padding=1),
+            nn.Conv2d(in_channel // 2, filter_size, 3, padding=1),
             nn.ReLU(inplace=True),
-            NormalizedConv2D(n_filters, n_filters, 1),
+            nn.Conv2d(filter_size, filter_size, 1),
             nn.ReLU(inplace=True),
-            ZeroConv2d(n_filters, in_channels),
+            ZeroConv2d(filter_size, in_channel),
         )
 
+        self.net[0].weight.data.normal_(0, 0.05)
+        self.net[0].bias.data.zero_()
+
+        self.net[2].weight.data.normal_(0, 0.05)
+        self.net[2].bias.data.zero_()
+
     def forward(self, x: Tensor) -> DOUBLE_TENSOR:
-        """
-        log det: sum(log(|s|))
-        """
-        x_a, x_b = x.chunk(2, dim=1)
-        log_s, t = self.net(x_a).chunk(2, 1)
-        s = torch.sigmoid(log_s + 2)
-        y_b = (x_b + t) * s
-        out = torch.cat([x_a, y_b], 1)
+        in_a, in_b = x.chunk(2, 1)
 
-        log_det = torch.sum(torch.log(s), dim=[1, 2, 3])
-        return out, log_det
+        log_s, t = self.net(in_a).chunk(2, 1)
+        s = F.sigmoid(log_s + 2)
+        out_b = (in_b + t) * s
 
-    @torch.no_grad()
+        log_det = torch.sum(torch.log(s), dim=(1, 2, 3))
+
+        return torch.cat([in_a, out_b], 1), log_det
+
     def reverse(self, y: Tensor) -> Tensor:
-        y_a, y_b = y.chunk(2, 1)
-        log_s, t = self.net(y_a).chunk(2, 1)
-        s = torch.sigmoid(log_s + 2)
-        x_b = y_b / s - t
+        out_a, out_b = y.chunk(2, 1)
 
-        return torch.cat([y_a, x_b], 1)
+        log_s, t = self.net(out_a).chunk(2, 1)
+        s = F.sigmoid(log_s + 2)
+        in_b = out_b / s - t
+
+        return torch.cat([out_a, in_b], 1)
 
 
 class Flow(nn.Module):
@@ -193,11 +175,11 @@ class Flow(nn.Module):
         self.coupling = AffineCoupling(in_channels, n_filters)
 
     def forward(self, x: Tensor) -> DOUBLE_TENSOR:
-        log_det = torch.zeros(x.shape[0], device=x.device)
-        for block in [self.actnorm, self.inv_conv2d, self.coupling]:
-            x, cur_log_det = block(x)
-            log_det += cur_log_det
-        return x, log_det
+        out, log_det_1 = self.actnorm(x)
+        out, log_det_2 = self.inv_conv2d(out)
+        out, log_det_3 = self.coupling(out)
+
+        return out, log_det_1 + log_det_2 + log_det_3
 
     @torch.no_grad()
     def reverse(self, y: Tensor) -> Tensor:
@@ -228,7 +210,7 @@ class GlowBlock(nn.Module):
         log_det = 0
         for flow in self.flow_blocks:
             x, cur_log_det = flow(x)
-            log_det += cur_log_det
+            log_det = log_det + cur_log_det
 
         # 3. Split (only if not last block)
         if self._is_last:
@@ -285,8 +267,8 @@ class Glow(nn.Module):
         for block in self.blocks:
             x, z_new, log_p_new, log_det_new = block(x)
             z_outs.append(z_new)
-            log_det += log_det_new
-            log_p += log_p_new
+            log_det = log_det + log_det_new
+            log_p = log_p + log_p_new
 
         return log_p, log_det, z_outs
 
