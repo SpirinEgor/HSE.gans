@@ -43,8 +43,10 @@ def train_loop(
             for images in tqdm(dataloader, desc="Training", leave=False):
                 images = images.to(device)
                 loss = train_step_func(model, images)
+
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
                 optimizer.step()
 
                 losses.append(loss.item())
