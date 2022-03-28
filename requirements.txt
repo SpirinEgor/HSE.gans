@@ -9,3 +9,4 @@ requests
 wandb
 pillow
 scikit-learn
+torchmetrics[image]

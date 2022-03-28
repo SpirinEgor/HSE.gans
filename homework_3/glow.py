@@ -150,7 +150,7 @@ class AffineCoupling(nn.Module):
         in_a, in_b = x.chunk(2, 1)
 
         log_s, t = self.net(in_a).chunk(2, 1)
-        s = F.sigmoid(log_s + 2)
+        s = torch.sigmoid(log_s + 2)
         out_b = (in_b + t) * s
 
         log_det = torch.sum(torch.log(s), dim=(1, 2, 3))
@@ -161,7 +161,7 @@ class AffineCoupling(nn.Module):
         out_a, out_b = y.chunk(2, 1)
 
         log_s, t = self.net(out_a).chunk(2, 1)
-        s = F.sigmoid(log_s + 2)
+        s = torch.sigmoid(log_s + 2)
         in_b = out_b / s - t
 
         return torch.cat([out_a, in_b], 1)
@@ -296,3 +296,8 @@ class Glow(nn.Module):
             sampled_images = self.reverse(z_noise)
             sampled_images = sampled_images.clamp(-0.5, 0.5) + 0.5
         return sampled_images
+
+    def sef_init_false(self):
+        for m in self.modules():
+            if isinstance(m, ActNorm):
+                m._is_init = True

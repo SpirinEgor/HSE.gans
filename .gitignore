@@ -8,3 +8,6 @@
 **/*celeba*
 .DS_Store
 *.ckpt
+
+**/samples/
+**/checkpoints/
